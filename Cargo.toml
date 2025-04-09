@@ -1,0 +1,18 @@
+[package]
+name = "hypertwist_calculator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aes-gcm = "0.10"
+base64 = "0.21"
+rand = "0.8"
+flate2 = "1.0"
+rayon = "1.7"
+thiserror = "2.0.11"                # derive(Error)
+ndarray = "0.16.1"                # An n-dimensional array for general elements and for numerics. Lightweight array views and sli…
+nalgebra = "0.33.2"                # General-purpose linear algebra library with transformations and statically-sized or dynamica…
+kiss3d = "0.35.0"             # 3D graphics engine for Rust.
+dfdx = "0.13.0"                        # Ergonomic auto differentiation in Rust, with pytorch like apis.
+autodiff = "0.7.0"                         # An automatic differentiation library
+plotters = "0.3"
