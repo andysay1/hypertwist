@@ -32,18 +32,21 @@ pub struct MetricComponents {
 impl MetricComponents {
     /// Вычисляет все компоненты метрики для заданного радиуса
     pub fn new(r: f64, params: &MetricParams) -> Self {
-        let f = 1.0 / (1.0 + (r / params.r0).powf(params.n));
-        let g_rr = 16.0 * (1.0 + r).powi(6) 
-            / (PI * r.powi(2) + 16.0 * (r.powi(2) + 2.0 * r + 1.0).powi(2));
-        let g_rtheta = -1.0 / (PI * r.powi(2) * (1.0 + r).powi(4));
-        let g_thetatheta = r.powi(2) / (1.0 + r).powi(2);
+        // 1)  Функция f(r)   — должна стремиться к 1, а не к 0
+        //    было: 1.0 / (1.0 + (r / params.r0).powf(params.n))
+        let f = 1.0 / (1.0 + (params.r0 / r).powf(params.n));              //  <-- FIX
 
-        Self {
-            f,
-            g_rr,
-            g_rtheta,
-            g_thetatheta,
-        }
+        // 2)  Радиальная компонента g_rr — перевёрнуты числитель и знаменатель
+        //    было:
+        // let g_rr = 16.0 * (1.0 + r).powi(6)
+        //     / (PI * r.powi(2) + 16.0 * (r.powi(2) + 2.0 * r + 1.0).powi(2));
+        let g_rr = (PI * r.powi(2) + 16.0 * (r.powi(2) + 2.0 * r + 1.0).powi(2))  // <-- FIX
+            / (16.0 * (1.0 + r).powi(6));
+
+        let g_rtheta      = -1.0 / (PI * r.powi(2) * (1.0 + r).powi(4));
+        let g_thetatheta  =  r.powi(2) / (1.0 + r).powi(2);
+
+        Self { f, g_rr, g_rtheta, g_thetatheta }
     }
 
     /// Создает матрицу метрики 4x4
@@ -111,17 +114,16 @@ pub fn christoffel(_g: &Matrix4<f64>, g_inv: &Matrix4<f64>, dg: &Matrix4<f64>) -
 }
 
 /// Вычисляет тензор Риччи с учетом производных символов Кристоффеля
+/// Полная реализация тензора Риччи:
+/// R_{μν} = ∂_λ Γ^λ_{μν} - ∂_ν Γ^λ_{μλ} + Γ^λ_{μν} Γ^σ_{λσ} - Γ^λ_{μσ} Γ^σ_{λν}
 pub fn ricci_tensor(r: f64, params: &MetricParams, h: f64) -> Matrix4<f64> {
     let comp = MetricComponents::new(r, params);
     let g = comp.to_matrix(params);
     let g_inv = g.try_inverse().unwrap();
     let dg = metric_derivatives(r, params, h);
-    
-    // Вычисляем символы Кристоффеля
     let gamma = christoffel(&g, &g_inv, &dg);
-    
-    
-    // Символы Кристоффеля при r+h
+
+    // Символы Кристоффеля при r±h
     let gamma_plus = {
         let comp_p = MetricComponents::new(r + h, params);
         let g_p = comp_p.to_matrix(params);
@@ -129,8 +131,6 @@ pub fn ricci_tensor(r: f64, params: &MetricParams, h: f64) -> Matrix4<f64> {
         let dg_p = metric_derivatives(r + h, params, h);
         christoffel(&g_p, &g_inv_p, &dg_p)
     };
-
-    // Символы Кристоффеля при r-h
     let gamma_minus = {
         let comp_m = MetricComponents::new(r - h, params);
         let g_m = comp_m.to_matrix(params);
@@ -138,22 +138,40 @@ pub fn ricci_tensor(r: f64, params: &MetricParams, h: f64) -> Matrix4<f64> {
         let dg_m = metric_derivatives(r - h, params, h);
         christoffel(&g_m, &g_inv_m, &dg_m)
     };
-    
-    // Тензор Риччи
+
     let mut ricci = Matrix4::<f64>::zeros();
+
     for mu in 0..4 {
         for nu in 0..4 {
             let mut sum = 0.0;
-            for rho in 0..4 {
-                // Вычисляем производную dΓ^ρ_{μν}/dx^σ
-                let dgamma = (gamma_plus[[rho, mu, nu]] - gamma_minus[[rho, mu, nu]]) / (2.0 * h);
-                
-                let gamma_sum = (0..4).map(|lambda| {
-                    gamma[[rho, lambda, rho]] * gamma[[lambda, mu, nu]]
-                    - gamma[[rho, lambda, nu]] * gamma[[lambda, mu, rho]]
-                }).sum::<f64>();
-                
-                sum += dgamma - gamma_sum;
+            for lam in 0..4 {
+                // ∂_λ Γ^λ_{μν}
+                let dgamma_l = if lam == 1 {
+                    (gamma_plus[[lam, mu, nu]] - gamma_minus[[lam, mu, nu]]) / (2.0 * h)
+                } else {
+                    0.0
+                };
+
+                // ∂_ν Γ^λ_{μλ}
+                let dgamma_nu = if nu == 1 {
+                    (gamma_plus[[lam, mu, lam]] - gamma_minus[[lam, mu, lam]]) / (2.0 * h)
+                } else {
+                    0.0
+                };
+
+                // Γ^λ_{μν} Γ^σ_{λσ}
+                let mut gamma_gamma = 0.0;
+                for sigma in 0..4 {
+                    gamma_gamma += gamma[[lam, mu, nu]] * gamma[[sigma, lam, sigma]];
+                }
+
+                // Γ^λ_{μσ} Γ^σ_{λν}
+                let mut gamma_cross = 0.0;
+                for sigma in 0..4 {
+                    gamma_cross += gamma[[lam, mu, sigma]] * gamma[[sigma, lam, nu]];
+                }
+
+                sum += dgamma_l - dgamma_nu + gamma_gamma - gamma_cross;
             }
             ricci[(mu, nu)] = sum;
         }
@@ -161,6 +179,7 @@ pub fn ricci_tensor(r: f64, params: &MetricParams, h: f64) -> Matrix4<f64> {
 
     ricci
 }
+
 
 
 /// Вычисляет скалярную кривизну
@@ -563,73 +582,121 @@ pub fn gw_waveform_distortion(r: f64, freq: f64, params: &MetricParams) -> f64 {
 }
 
 /// Проверка тождества Бианки: ∇^μ G_{μν} ≈ 0
+/// Проверка тождества Бианки: ∇^μ G_{μν} ≈ 0
 pub fn check_bianchi_identity(r: f64, params: &MetricParams, h: f64) -> Vector4<f64> {
-    let comp = MetricComponents::new(r, params);
-    let g = comp.to_matrix(params);
-    let g_inv = g.try_inverse().unwrap();
-    let dg = metric_derivatives(r, params, h);
-    let gamma = christoffel(&g, &g_inv, &dg);
-    let ricci = ricci_tensor(r, params, h);
-    let scalar_r = scalar_curvature(&g_inv, &ricci);
+    //---------------------------------
+    // 0.  Постоянные вспомогательные объекты
+    //---------------------------------
+    let comp      = MetricComponents::new(r, params);
+    let g         = comp.to_matrix(params);
+    let g_inv     = g.try_inverse().unwrap();
+    let dg        = metric_derivatives(r, params, h);
+    let gamma     = christoffel(&g, &g_inv, &dg);          // Γᵃ_{ bc}
+
+    let cond_g = g.norm() * g_inv.norm();
+println!("cond(g) = {:.3e}", cond_g);
+    //---------------------------------
+    // 1.  Тензор Эйнштейна   G_{μν}
+    //---------------------------------
+    let ricci     = ricci_tensor(r, params, h);
+    let scalar_r  = scalar_curvature(&g_inv, &ricci);
+
+    let mut G_dn  = Matrix4::<f64>::zeros();               // G_{μν}
+    for mu in 0..4 {
+        for nu in 0..4 {
+            G_dn[(mu,nu)] = ricci[(mu,nu)] - 0.5 * scalar_r * g[(mu,nu)];
+        }
+    }
+
+    // 1.1  Поднимаем первый индекс:   G^{μ}{}_{ν} = g^{μα} G_{αν}
+    let mut G_up  = Matrix4::<f64>::zeros();               // G^{μ}_{ ν}
+    for mu in 0..4 {
+        for nu in 0..4 {
+            let mut s = 0.0;
+            for alpha in 0..4 {
+                s += g_inv[(mu,alpha)] * G_dn[(alpha,nu)];
+            }
+            G_up[(mu,nu)] = s;
+        }
+    }
+
+    //---------------------------------
+    // 2.  Численная производная  ∂_r G^{μ}{}_{ν}
+    //---------------------------------
+    let make_G_up = |r_shift: f64| -> Matrix4<f64> {
+        let cp       = MetricComponents::new(r_shift, params);
+        let gp       = cp.to_matrix(params);
+        let gp_inv   = gp.try_inverse().unwrap();
+        let riccip   = ricci_tensor(r_shift, params, h);
+        let scalarp  = scalar_curvature(&gp_inv, &riccip);
+
+        let mut G_dn_p = Matrix4::<f64>::zeros();
+        for mu in 0..4 {
+            for nu in 0..4 {
+                G_dn_p[(mu,nu)] = riccip[(mu,nu)] - 0.5 * scalarp * gp[(mu,nu)];
+            }
+        }
+
+        let mut G_up_p = Matrix4::<f64>::zeros();
+        for mu in 0..4 {
+            for nu in 0..4 {
+                let mut s = 0.0;
+                for alpha in 0..4 { s += gp_inv[(mu,alpha)] * G_dn_p[(alpha,nu)]; }
+                G_up_p[(mu,nu)] = s;
+            }
+        }
+        G_up_p
+    };
+
+    let G_up_p1 = make_G_up(r + h);
+    let G_up_m1 = make_G_up(r - h);
+    let G_up_p2 = make_G_up(r + 2.0 * h);
+    let G_up_m2 = make_G_up(r - 2.0 * h);
     
-    // Тензор Эйнштейна
-    let mut einstein = Matrix4::<f64>::zeros();
+    let mut dGdr_up = Matrix4::<f64>::zeros();
     for mu in 0..4 {
         for nu in 0..4 {
-            einstein[(mu, nu)] = ricci[(mu, nu)] - 0.5 * scalar_r * g[(mu, nu)];
+            dGdr_up[(mu,nu)] = (
+                8.0 * (G_up_p1[(mu,nu)] - G_up_m1[(mu,nu)])
+                - (G_up_p2[(mu,nu)] - G_up_m2[(mu,nu)])
+            ) / (12.0 * h);
         }
     }
 
-    // Численная производная по r
-    let einstein_plus = {
-        let comp_p = MetricComponents::new(r + h, params);
-        let g_p = comp_p.to_matrix(params);
-        let g_inv_p = g_p.try_inverse().unwrap();
-        let ricci_p = ricci_tensor(r + h, params, h);
-        let scalar_r_p = scalar_curvature(&g_inv_p, &ricci_p);
-        let mut einstein_p = Matrix4::<f64>::zeros();
-        for mu in 0..4 {
-            for nu in 0..4 {
-                einstein_p[(mu, nu)] = ricci_p[(mu, nu)] - 0.5 * scalar_r_p * g_p[(mu, nu)];
-            }
-        }
-        einstein_p
-    };
 
-    let einstein_minus = {
-        let comp_m = MetricComponents::new(r - h, params);
-        let g_m = comp_m.to_matrix(params);
-        let g_inv_m = g_m.try_inverse().unwrap();
-        let ricci_m = ricci_tensor(r - h, params, h);
-        let scalar_r_m = scalar_curvature(&g_inv_m, &ricci_m);
-        let mut einstein_m = Matrix4::<f64>::zeros();
-        for mu in 0..4 {
-            for nu in 0..4 {
-                einstein_m[(mu, nu)] = ricci_m[(mu, nu)] - 0.5 * scalar_r_m * g_m[(mu, nu)];
-            }
-        }
-        einstein_m
-    };
-
-    let mut d_g = Matrix4::<f64>::zeros();
-    for mu in 0..4 {
-        for nu in 0..4 {
-            d_g[(mu, nu)] = (einstein_plus[(mu, nu)] - einstein_minus[(mu, nu)]) / (2.0 * h);
-        }
-    }
-
-    // ∇^μ G_{μν}
+    //---------------------------------
+    // 3.  Ковариантный дивергенс  ∇^μ G_{μν}
+    //---------------------------------
+    // так как метрика зависит только от r (= x¹), индекс μ=1 даёт ненулевую производную
+    //   ∇^μ G_{μν} = g^{μσ}(∂_σ G_{μν}) + Γ^μ_{μα} G^{α}{}_{ν} - Γ^α_{μν} G^{μ}{}_{α}
+    // в нашем случае σ = 1  ⇒  ∂_σ  = ∂_r
     let mut bianchi = Vector4::<f64>::zeros();
     for nu in 0..4 {
-        let mut sum = 0.0;
+        let mut div = 0.0;
         for mu in 0..4 {
-            sum += d_g[(mu, nu)];
-            for lambda in 0..4 {
-                sum += gamma[[mu, mu, lambda]] * einstein[(lambda, nu)];
-                sum -= gamma[[lambda, mu, nu]] * einstein[(mu, lambda)];
+            // Только d/dr (mu=1) даёт вклад в ∂_σ G^μ_ν
+            let dG = if mu == 1 {
+                dGdr_up[(mu, nu)]
+            } else {
+                0.0
+            };
+    
+            // Γ^μ_{μα} G^α_ν
+            let mut term1 = 0.0;
+            for alpha in 0..4 {
+                term1 += gamma[[mu, mu, alpha]] * G_up[(alpha, nu)];
             }
+    
+            // Γ^α_{μν} G^μ_α
+            let mut term2 = 0.0;
+            for alpha in 0..4 {
+                term2 += gamma[[alpha, mu, nu]] * G_up[(mu, alpha)];
+            }
+    
+            div += dG + term1 - term2;
         }
-        bianchi[nu] = sum;
+    
+        bianchi[nu] = div;
     }
 
     bianchi
